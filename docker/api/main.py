@@ -348,14 +348,24 @@ def audit_model():
 
     try:
         run = client.get_run(mv.run_id)
+
+        if run.data.tags.get("lab_run_type") != "final":
+            raise HTTPException(status_code=409, detail="champion_invalid")
+
+        artifact_paths = _list_artifacts_recursive(client, run.info.run_id)
+        training_size = run.data.params.get("training_size")
+
         return {
-            "registered_model_name": REGISTERED_MODEL_NAME,
+            "model_name": REGISTERED_MODEL_NAME,
             "alias": MODEL_ALIAS,
-            "version": mv.version,
+            "version": int(mv.version),
             "run_id": mv.run_id,
-            "tags": run.data.tags,
-            "metrics": run.data.metrics,
-            "params": run.data.params,
+            "protocol_run_id": run.data.tags.get("lab_protocol_run_id"),
+            "selected_experiment_run_id": run.data.tags.get("lab_selected_experiment_run_id"),
+            "configuration_id": run.data.tags.get("lab_configuration_id"),
+            "configuration": _load_configuration_artifact(client, run.info.run_id, artifact_paths),
+            "training_size": int(training_size) if training_size is not None else None,
+            "test_macro_f1": run.data.metrics.get("test_macro_f1"),
         }
     except MlflowException as exc:
         raise HTTPException(status_code=503, detail="mlflow_unavailable") from exc
