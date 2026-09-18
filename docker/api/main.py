@@ -6,6 +6,7 @@ from typing import Union
 
 import mlflow
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
 from pydantic import BaseModel, field_validator
@@ -124,7 +125,10 @@ def health():
         _, run_id = _get_model()
         return {"status": "ok", "model_run_id": run_id}
     except (MlflowException, OSError):
-        return {"status": "unavailable", "model_run_id": None}
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "model_run_id": None},
+        )
 
 
 @app.get("/audit/protocol")
@@ -133,13 +137,13 @@ def audit_protocol():
         client = _get_mlflow_client()
         experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
         if experiment is None:
-            raise HTTPException(status_code=404, detail="experiment_not_found")
-
-        runs = client.search_runs(
-            experiment_ids=[experiment.experiment_id],
-            filter_string="tags.lab_run_type = 'protocol'",
-            max_results=2,
-        )
+            runs = []
+        else:
+            runs = client.search_runs(
+                experiment_ids=[experiment.experiment_id],
+                filter_string="tags.lab_run_type = 'protocol'",
+                max_results=2,
+            )
         if len(runs) != 1:
             raise HTTPException(status_code=409, detail="protocol_not_unique")
 
@@ -193,7 +197,7 @@ def audit_runs():
         client = _get_mlflow_client()
         experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
         if experiment is None:
-            raise HTTPException(status_code=404, detail="experiment_not_found")
+            return []
 
         runs = client.search_runs(
             experiment_ids=[experiment.experiment_id],
@@ -239,17 +243,25 @@ def _load_members_artifact(client: MlflowClient, protocol_run_id: str) -> list:
 @app.get("/audit/contributions")
 def audit_contributions():
     try:
+        empty_contributions = {
+            "members": [],
+            "invalid_run_ids": [],
+            "unattributed_run_ids": [],
+        }
+
         client = _get_mlflow_client()
         experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
         if experiment is None:
-            raise HTTPException(status_code=404, detail="experiment_not_found")
+            return empty_contributions
 
         protocol_runs = client.search_runs(
             experiment_ids=[experiment.experiment_id],
             filter_string="tags.lab_run_type = 'protocol'",
             max_results=2,
         )
-        if len(protocol_runs) != 1:
+        if len(protocol_runs) == 0:
+            return empty_contributions
+        if len(protocol_runs) > 1:
             raise HTTPException(status_code=409, detail="protocol_not_unique")
 
         members_rows = _load_members_artifact(client, protocol_runs[0].info.run_id)
@@ -321,11 +333,20 @@ def audit_contributions():
         raise HTTPException(status_code=503, detail="mlflow_unavailable") from exc
 
 
+CHAMPION_NOT_FOUND_ERROR_CODES = {"RESOURCE_DOES_NOT_EXIST", "INVALID_PARAMETER_VALUE"}
+
+
 @app.get("/audit/model")
 def audit_model():
+    client = _get_mlflow_client()
     try:
-        client = _get_mlflow_client()
         mv = client.get_model_version_by_alias(REGISTERED_MODEL_NAME, MODEL_ALIAS)
+    except MlflowException as exc:
+        if exc.error_code in CHAMPION_NOT_FOUND_ERROR_CODES:
+            raise HTTPException(status_code=404, detail="champion_not_found") from exc
+        raise HTTPException(status_code=503, detail="mlflow_unavailable") from exc
+
+    try:
         run = client.get_run(mv.run_id)
         return {
             "registered_model_name": REGISTERED_MODEL_NAME,
